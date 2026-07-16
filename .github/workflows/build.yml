@@ -60,9 +60,14 @@ env:
   # openssl defaults (917219 bytes) on this particular build - the opposite
   # of the usual assumption. Left on openssl (i.e. just not overriding the
   # defaults) since it measurably wins here.
+  #
+  # kmod-tun: tailscaled DEPENDS on this (not built into the kernel here,
+  # unlike IPv6) - needed for the TUN device it creates. Small (~21KB), not
+  # baked-in tailscaled itself - see the tailscale-ram comment above.
   PACKAGES: >-
     luci
     dnsmasq
+    kmod-tun
     -dnsmasq-full
     -odhcp6c
     -odhcpd-ipv6only
@@ -141,7 +146,7 @@ jobs:
       - name: Extract, strip, and compress the tailscaled binary
         run: |
           set -euo pipefail
-          APK="$(find sdk/bin/packages -iname 'tailscale_*.apk' | head -1)"
+          APK="$(find sdk/bin/packages -iname 'tailscale-*.apk' | head -1)"
           test -n "$APK"
           echo "Built package: $APK"
           WORK="$(mktemp -d)"
