@@ -35,11 +35,48 @@ by the community:
 If you want a higher-confidence path, the source-compiled V3-specific build
 mentioned above is worth tracking down before flashing this image.
 
-**Update: confirmed working on real V3 (EU) hardware.** This image has been
-flashed onto an actual TL-MR6400 (EU) V3 and booted successfully — LAN, WiFi,
-and LuCI all work. LTE was not tested (packages for it are stripped from this
-build anyway). Still worth keeping the recovery precautions below in mind for
-your own unit, but this is no longer purely theoretical.
+**Update: confirmed working on real V3 (EU) hardware** — booted successfully,
+LAN/WiFi/LuCI all work. But also see the flash-space problem below, found on
+this same unit — the fact that it boots is not the same as it being reliable
+long-term.
+
+## Flash is extremely tight on this device — read this before flashing
+
+The "firmware" MTD partition on this profile is a fixed **7808k**. It's split
+at build time into kernel + squashfs rootfs, and whatever's left over
+(rounded down to erase-block size) becomes the writable `rootfs_data`
+(overlay) partition — the one that stores your root password, WiFi config,
+literally everything you change.
+
+A build with just `luci` on top of this profile's defaults (stripped
+USB/LTE/PPP, nothing else added) already used up all but ~256KB of that
+budget. 256KB is 4 erase blocks, and JFFS2 refuses to mount on that few:
+
+```
+kernel: Too few erase blocks (4)
+mount_root: failed - mount -t jffs2 /dev/mtdblock4 /rom/overlay
+mount_root: jffs2 not ready yet, using temporary tmpfs overlay
+```
+
+The router then silently falls back to a **RAM-only tmpfs overlay** — it
+boots fine and LuCI looks completely normal, but *nothing you configure
+survives a reboot*: root password, WiFi settings, everything reverts to
+firmware defaults every time. This existed from the very first successful
+build, before tailscale or anything else was added — it's a structural
+property of this profile at this flash size, not something a specific
+package broke.
+
+The `PACKAGES` list now trims further specifically to claw back headroom
+(see comments in `build.yml`for the full reasoning):
+`dnsmasq-full` → `dnsmasq`, and drops `odhcp6c`/`odhcpd-ipv6only` (IPv6
+DHCP client/server userspace bits — the kernel still has IPv6 itself, that's
+not a removable module). The build has a CI check (`Check overlay headroom`)
+that fails the workflow if the resulting image would leave less than 1MB for
+the overlay, specifically to catch this regressing again.
+
+**After flashing any build from this repo, verify persistence before trusting
+it**: SSH in, run `mount | grep overlay` — if the source is
+`overlayfs:/tmp/root`, you're on the broken tmpfs fallback, not real flash.
 
 ## Building
 
@@ -47,21 +84,10 @@ Actions tab → **Build ImmortalWrt firmware (TL-MR6400 v4 profile)** →
 *Run workflow*. Optionally override the ImmortalWrt version (defaults to
 `25.12.1`). Output `.bin` files are attached as a workflow artifact.
 
-Two jobs run in sequence:
-
-1. **build-tailscale** — cross-compiles the `tailscale` package from source
-   via the ImmortalWrt SDK (prebuilt toolchain, no kernel/base rebuild —
-   takes a few minutes). Needed because the prebuilt `tailscale` binary
-   package isn't published for this architecture (see below).
-2. **build-firmware** — downloads ImageBuilder, drops the SDK-built
-   `tailscale` package into its local `packages/` directory (ImageBuilder
-   auto-indexes anything dropped there and installs it like any other
-   package, no signing/repo config needed), then builds the image.
-
-Package set: `luci`, `tailscale`, `luci-app-tailscale-community` (+ zh-cn
-translation), plus LAN and WiFi (already in the target's defaults). Stripped:
-USB, LTE/QMI modem support, PPP — none of it is needed for this use case. No
-dedicated WireGuard packages — see below.
+Package set: `luci`, `dnsmasq`, plus LAN and WiFi (already in the target's
+defaults). Stripped: USB, LTE/QMI modem support, PPP, IPv6 DHCP client/server,
+`dnsmasq-full`'s extra features — see the flash-space section above for why.
+No Tailscale, no dedicated WireGuard packages — see below.
 
 ## Flashing — do this carefully
 
@@ -99,24 +125,22 @@ Instead, VPN needs are covered by **Tailscale**, which bundles its own
 userspace WireGuard protocol implementation (`wireguard-go`) over a TUN
 device and doesn't need the kernel module.
 
-## Tailscale (baked into the image)
+## Tailscale — not in this image, install it after confirming persistence works
 
-`tailscale` and `luci-app-tailscale-community` are installed at build time —
-see "Building" above for why (short version: the prebuilt `tailscale` .apk
-isn't published for `mipsel_24kc` on any OpenWrt/ImmortalWrt feed, official
-or third-party — the one third-party feed that exists,
-[lanrat/openwrt-tailscale-repo](https://github.com/lanrat/openwrt-tailscale-repo),
+An earlier version of this repo baked `tailscale` + `luci-app-tailscale-community`
+straight into the firmware. That's on hold: baking it in made the flash-space
+problem above worse, not better (tailscale's binary is a few MB even
+compressed, on a device with barely any margin to begin with), and there was
+no point trying to fit it in before the base image could even hold a
+persistent config.
+
+The prebuilt `tailscale` .apk still isn't published for `mipsel_24kc` on any
+OpenWrt/ImmortalWrt feed, official or third-party — the one third-party feed
+that exists, [lanrat/openwrt-tailscale-repo](https://github.com/lanrat/openwrt-tailscale-repo),
 only publishes old-format `opkg` `.ipk` packages, incompatible with this
-image's `apk` package manager, so this repo cross-compiles it from source
-instead via the SDK).
-
-What's *not* baked in, and can't be (it's per-device and secret): actually
-joining your tailnet. After flashing, either use the LuCI page under
-Services → Tailscale (from `luci-app-tailscale-community`), or SSH in and
-run:
-
-```
-tailscale up
-```
-
-and follow the login link it prints.
+image's `apk` package manager. So installing it later still means
+cross-compiling it (via the ImmortalWrt SDK, targeting this same
+release/arch) and side-loading the resulting `.apk` through LuCI's
+System → Software → "Upload Package", rather than a plain `apk add tailscale`.
+Once the base image's overlay is confirmed persistent (see above), that's the
+next thing to sort out — not done yet.
