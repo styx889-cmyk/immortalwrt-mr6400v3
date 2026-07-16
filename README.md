@@ -35,16 +35,33 @@ by the community:
 If you want a higher-confidence path, the source-compiled V3-specific build
 mentioned above is worth tracking down before flashing this image.
 
+**Update: confirmed working on real V3 (EU) hardware.** This image has been
+flashed onto an actual TL-MR6400 (EU) V3 and booted successfully — LAN, WiFi,
+and LuCI all work. LTE was not tested (packages for it are stripped from this
+build anyway). Still worth keeping the recovery precautions below in mind for
+your own unit, but this is no longer purely theoretical.
+
 ## Building
 
 Actions tab → **Build ImmortalWrt firmware (TL-MR6400 v4 profile)** →
 *Run workflow*. Optionally override the ImmortalWrt version (defaults to
-`25.12.1`). Takes a few minutes (uses ImageBuilder, not a full source
-compile). Output `.bin` files are attached as a workflow artifact.
+`25.12.1`). Output `.bin` files are attached as a workflow artifact.
 
-Package set: `luci`, plus LAN and WiFi (already in the target's defaults).
-Stripped: USB, LTE/QMI modem support, PPP — none of it is needed for this
-use case. No dedicated WireGuard packages — see below.
+Two jobs run in sequence:
+
+1. **build-tailscale** — cross-compiles the `tailscale` package from source
+   via the ImmortalWrt SDK (prebuilt toolchain, no kernel/base rebuild —
+   takes a few minutes). Needed because the prebuilt `tailscale` binary
+   package isn't published for this architecture (see below).
+2. **build-firmware** — downloads ImageBuilder, drops the SDK-built
+   `tailscale` package into its local `packages/` directory (ImageBuilder
+   auto-indexes anything dropped there and installs it like any other
+   package, no signing/repo config needed), then builds the image.
+
+Package set: `luci`, `tailscale`, `luci-app-tailscale-community` (+ zh-cn
+translation), plus LAN and WiFi (already in the target's defaults). Stripped:
+USB, LTE/QMI modem support, PPP — none of it is needed for this use case. No
+dedicated WireGuard packages — see below.
 
 ## Flashing — do this carefully
 
@@ -61,8 +78,11 @@ use case. No dedicated WireGuard packages — see below.
    trigger sequence are bootloader-specific and were not confirmed for V3 in
    any source checked while building this. Guessing wrong here is how
    devices get bricked.
-4. After a successful flash: LuCI is at `192.168.1.1`, set a root password
-   on first login.
+4. After a successful flash: LuCI is at `192.168.1.1`. **No root password is
+   set by default** — LuCI will nag with a banner ("未设置密码!") until you
+   set one under 系统 (System) → 管理权 (Administration). Do this before
+   exposing the router to anything untrusted; until then anyone on the LAN
+   has unauthenticated root access via LuCI and SSH.
 
 ## VPN: Tailscale only, no standalone WireGuard
 
@@ -75,22 +95,28 @@ kernel-side implementation is missing. Getting real kernel WireGuard here
 would require a full source build with a patched kernel config, not
 ImageBuilder — out of scope for this repo.
 
-Instead, VPN needs are covered by **Tailscale** (below), which bundles its
-own userspace WireGuard protocol implementation (`wireguard-go`) over a TUN
+Instead, VPN needs are covered by **Tailscale**, which bundles its own
+userspace WireGuard protocol implementation (`wireguard-go`) over a TUN
 device and doesn't need the kernel module.
 
-## Tailscale (post-install)
+## Tailscale (baked into the image)
 
-Not baked into the image. After flashing:
+`tailscale` and `luci-app-tailscale-community` are installed at build time —
+see "Building" above for why (short version: the prebuilt `tailscale` .apk
+isn't published for `mipsel_24kc` on any OpenWrt/ImmortalWrt feed, official
+or third-party — the one third-party feed that exists,
+[lanrat/openwrt-tailscale-repo](https://github.com/lanrat/openwrt-tailscale-repo),
+only publishes old-format `opkg` `.ipk` packages, incompatible with this
+image's `apk` package manager, so this repo cross-compiles it from source
+instead via the SDK).
+
+What's *not* baked in, and can't be (it's per-device and secret): actually
+joining your tailnet. After flashing, either use the LuCI page under
+Services → Tailscale (from `luci-app-tailscale-community`), or SSH in and
+run:
 
 ```
-opkg update
-opkg install tailscale
+tailscale up
 ```
 
-The official ImmortalWrt package feed for `mipsel_24kc` has **not always
-carried a `tailscale` package** (removed at times per the
-[OpenWrt forum](https://forum.openwrt.org/t/unknown-package-tailscale-no-longer-supported/201496)).
-If `opkg install tailscale` fails, check
-[lanrat/openwrt-tailscale-repo](https://github.com/lanrat/openwrt-tailscale-repo)
-as a third-party prebuilt feed for this architecture.
+and follow the login link it prints.

@@ -26,6 +26,7 @@ env:
   TARGET: ramips
   SUBTARGET: mt76x8
   PROFILE: tplink_tl-mr6400-v4
+  ARCH: mipsel_24kc
   # Packages to add/remove from the default image.
   # Defaults already include: luci, dnsmasq-full, firewall4, nftables, wpad-basic-openssl,
   # kmod-mt7603 (wifi), and (from the mr6400-v4 device definition) USB + LTE modem
@@ -36,12 +37,24 @@ env:
   # NOTE: no kmod-wireguard here on purpose. ImmortalWrt does not build the
   # WireGuard kernel module for ramips/mt76x8 at all (checked 23.05/24.10/
   # 25.12/snapshot - none have it), so wireguard-tools/luci-proto-wireguard
-  # would install but never actually establish a tunnel. VPN is handled by
-  # Tailscale post-install instead, which uses its own userspace WireGuard
-  # implementation (wireguard-go) over a TUN device and doesn't need the
-  # kernel module. See README.md.
+  # would install but never actually establish a tunnel.
+  #
+  # Tailscale doesn't need kmod-wireguard (it bundles its own userspace
+  # implementation over a TUN device), but the prebuilt `tailscale` binary
+  # package itself isn't published for mipsel_24kc either (checked 23.05/
+  # 24.10/25.12/snapshot, on both openwrt and immortalwrt feeds - the recipe
+  # exists, it's just not built for this arch). So the build-tailscale job
+  # below cross-compiles it from source via the SDK (fast - reuses the
+  # prebuilt toolchain, no kernel/base-system rebuild) and the firmware job
+  # sideloads the resulting .apk into ImageBuilder's local packages/ dir,
+  # which it indexes and installs automatically. luci-app-tailscale-community
+  # (+ zh-cn translation) IS prebuilt already, since LuCI apps are
+  # architecture-independent.
   PACKAGES: >-
     luci
+    tailscale
+    luci-app-tailscale-community
+    luci-i18n-tailscale-community-zh-cn
     -kmod-usb2
     -kmod-usb-ohci
     -kmod-usb-ledtrig-usbport
@@ -52,8 +65,69 @@ env:
     -ppp-mod-pppoe
 
 jobs:
-  build:
+  resolve-version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          VERSION="${{ github.event.inputs.immortalwrt_version || '25.12.1' }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build-tailscale:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - name: Install SDK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev zlib1g-dev gawk git \
+            gettext libssl-dev xsltproc rsync unzip python3 zstd file
+
+      - name: Download SDK
+        run: |
+          set -euo pipefail
+          FILE="immortalwrt-sdk-${VERSION}-${TARGET}-${SUBTARGET}_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+          URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}/${FILE}"
+          echo "Downloading $URL"
+          curl -fL -o sdk.tar.zst "$URL"
+          mkdir -p sdk
+          tar --use-compress-program=unzstd -xf sdk.tar.zst -C sdk --strip-components=1
+
+      - name: Build tailscale package
+        run: |
+          set -euo pipefail
+          cd sdk
+          ./scripts/feeds update packages
+          ./scripts/feeds install tailscale
+          echo "CONFIG_PACKAGE_tailscale=m" >> .config
+          make defconfig
+          make package/tailscale/compile V=s -j"$(nproc)"
+
+      - name: Collect package output
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find sdk/bin/packages -iname 'tailscale_*.apk' -exec cp {} out/ \;
+          ls -lh out/
+          test -n "$(ls -A out/)" # fail loudly if nothing was found
+
+      - name: Upload tailscale package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-apk-${{ env.VERSION }}
+          path: out/
+          retention-days: 7
+
+  build-firmware:
+    needs: [resolve-version, build-tailscale]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,22 +137,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zstd
 
-      - name: Resolve version
-        id: ver
-        run: |
-          VERSION="${{ github.event.inputs.immortalwrt_version || '25.12.1' }}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Download ImageBuilder
         run: |
           set -euo pipefail
-          VERSION="${{ steps.ver.outputs.version }}"
           FILE="immortalwrt-imagebuilder-${VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.zst"
           URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}/${FILE}"
           echo "Downloading $URL"
           curl -fL -o imagebuilder.tar.zst "$URL"
           mkdir -p imagebuilder
           tar --use-compress-program=unzstd -xf imagebuilder.tar.zst -C imagebuilder --strip-components=1
+
+      - name: Download tailscale package
+        uses: actions/download-artifact@v4
+        with:
+          name: tailscale-apk-${{ env.VERSION }}
+          path: imagebuilder/packages/
 
       - name: Build firmware image
         run: |
@@ -98,6 +171,6 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-${{ steps.ver.outputs.version }}-${{ env.PROFILE }}
+          name: immortalwrt-${{ env.VERSION }}-${{ env.PROFILE }}-tailscale
           path: out/
           retention-days: 30
