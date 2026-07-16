@@ -1,0 +1,99 @@
+name: Build ImmortalWrt firmware (TL-MR6400 v4 profile)
+
+# TL-MR6400 (EU) V3 has no upstream OpenWrt/ImmortalWrt device profile of
+# its own. We build using the tplink_tl-mr6400-v4 profile instead: it's the
+# same product line/hardware revision (not a different model like the
+# MR3420), is natively supported by ImmortalWrt (no source patches needed),
+# and its device packages already assume the same internal USB-attached LTE
+# modem wiring this board has. We strip the LTE/USB/PPP packages below since
+# they aren't needed, but they can be re-added later if LTE is wanted.
+#
+# This is still unverified for v3 specifically - see README.md before flashing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      immortalwrt_version:
+        description: "ImmortalWrt release version"
+        required: true
+        default: "25.12.1"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build.yml"
+
+env:
+  TARGET: ramips
+  SUBTARGET: mt76x8
+  PROFILE: tplink_tl-mr6400-v4
+  # Packages to add/remove from the default image.
+  # Defaults already include: luci, dnsmasq-full, firewall4, nftables, wpad-basic-openssl,
+  # kmod-mt7603 (wifi), and (from the mr6400-v4 device definition) USB + LTE modem
+  # support (kmod-usb2, kmod-usb-ohci, kmod-usb-ledtrig-usbport,
+  # kmod-usb-serial-option, kmod-usb-net-qmi-wwan, uqmi) + ppp.
+  # We add WireGuard (+ LuCI UI) and strip USB/LTE/PPP, which we don't need.
+  PACKAGES: >-
+    luci
+    luci-app-wireguard
+    luci-proto-wireguard
+    wireguard-tools
+    kmod-wireguard
+    -kmod-usb2
+    -kmod-usb-ohci
+    -kmod-usb-ledtrig-usbport
+    -kmod-usb-serial-option
+    -kmod-usb-net-qmi-wwan
+    -uqmi
+    -ppp
+    -ppp-mod-pppoe
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
+      - name: Resolve version
+        id: ver
+        run: |
+          VERSION="${{ github.event.inputs.immortalwrt_version || '25.12.1' }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download ImageBuilder
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          FILE="immortalwrt-imagebuilder-${VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.zst"
+          URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}/${FILE}"
+          echo "Downloading $URL"
+          curl -fL -o imagebuilder.tar.zst "$URL"
+          mkdir -p imagebuilder
+          tar --use-compress-program=unzstd -xf imagebuilder.tar.zst -C imagebuilder --strip-components=1
+
+      - name: Build firmware image
+        run: |
+          set -euo pipefail
+          cd imagebuilder
+          make image \
+            PROFILE="${PROFILE}" \
+            PACKAGES="${PACKAGES}"
+
+      - name: Collect output
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp imagebuilder/bin/targets/${TARGET}/${SUBTARGET}/*${PROFILE}* out/
+          ls -lh out/
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-${{ steps.ver.outputs.version }}-${{ env.PROFILE }}
+          path: out/
+          retention-days: 30
