@@ -67,12 +67,21 @@ property of this profile at this flash size, not something a specific
 package broke.
 
 The `PACKAGES` list now trims further specifically to claw back headroom
-(see comments in `build.yml`for the full reasoning):
+(see comments in `build.yml` for the full reasoning):
 `dnsmasq-full` → `dnsmasq`, and drops `odhcp6c`/`odhcpd-ipv6only` (IPv6
 DHCP client/server userspace bits — the kernel still has IPv6 itself, that's
-not a removable module). The build has a CI check (`Check overlay headroom`)
-that fails the workflow if the resulting image would leave less than 1MB for
-the overlay, specifically to catch this regressing again.
+not a removable module). Swapping the TLS backend from OpenSSL to mbedTLS was
+also tried, on the (usually reasonable) assumption that mbedTLS is smaller —
+measured *worse* here (720611 bytes free vs. 917219 with OpenSSL), so that
+change was reverted. Don't assume that optimization helps without measuring
+it on this specific build.
+
+The build has a CI check (`Check overlay headroom`) that fails the workflow
+if the image would leave less than 512KB (8 erase blocks) free for the
+overlay. JFFS2 measurably refused to mount at 4 erase blocks (256KB) on real
+hardware; 8 is a commonly-cited practical minimum for it to actually work
+long-term rather than just barely mount, so that's the bar rather than a more
+arbitrary round number.
 
 **After flashing any build from this repo, verify persistence before trusting
 it**: SSH in, run `mount | grep overlay` — if the source is

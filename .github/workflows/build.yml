@@ -43,20 +43,18 @@ env:
   #   client/server userspace bits.
   # - dnsmasq-full -> dnsmasq: the "full" build adds DNSSEC/extra features
   #   we don't use; the base package covers DHCP+DNS for a home LAN.
-  # - openssl -> mbedtls: mbedTLS is meaningfully smaller than OpenSSL in an
-  #   embedded build. Swapping both wpad's and libustream's TLS backend
-  #   together (mixing the two would just pull in both libraries, worse than
-  #   either alone) was still short by ~130KB, so this covers the rest.
+  #
+  # Tried and reverted: swapping openssl -> mbedtls for wpad/libustream.
+  # Measured *smaller* free space with mbedtls (720611 bytes) than with the
+  # openssl defaults (917219 bytes) on this particular build - the opposite
+  # of the usual assumption. Left on openssl (i.e. just not overriding the
+  # defaults) since it measurably wins here.
   PACKAGES: >-
     luci
     dnsmasq
-    wpad-basic-mbedtls
-    libustream-mbedtls
     -dnsmasq-full
     -odhcp6c
     -odhcpd-ipv6only
-    -wpad-basic-openssl
-    -libustream-openssl
     -kmod-usb2
     -kmod-usb-ohci
     -kmod-usb-ledtrig-usbport
@@ -116,7 +114,12 @@ jobs:
         run: |
           set -euo pipefail
           FIRMWARE_BUDGET=7995392  # 7808k, the fixed "firmware" MTD partition size for this profile
-          MIN_OVERLAY=1048576      # want at least 1MB free for a reliably-mountable JFFS2 overlay
+          # JFFS2 refused to mount at 4 erase blocks (256KB - confirmed on real
+          # hardware, "Too few erase blocks (4)"). 8 erase blocks (512KB, 64KB
+          # erasesize on this device) is a commonly-cited practical minimum
+          # for JFFS2 to actually work rather than just barely mount, so that's
+          # the bar here rather than the more arbitrary 1MB tried earlier.
+          MIN_OVERLAY=524288
           IMG="$(find imagebuilder/bin/targets/${TARGET}/${SUBTARGET} -iname '*squashfs-sysupgrade.bin')"
           SIZE=$(stat -c%s "$IMG")
           FREE=$((FIRMWARE_BUDGET - SIZE))
