@@ -146,11 +146,18 @@ jobs:
       - name: Extract, strip, and compress the tailscaled binary
         run: |
           set -euo pipefail
+          BASE="$(pwd)"
           APK="$(find sdk/bin/packages -iname 'tailscale-*.apk' | head -1)"
           test -n "$APK"
           echo "Built package: $APK"
+          # .apk here is OpenWrt 25.12+'s APKv3/ADB format (custom binary
+          # container, DEFLATE-compressed) - NOT a tar.gz despite the
+          # extension. Plain `tar xzf` fails with "not in gzip format".
+          # Use the SDK's own apk tool to extract it instead.
+          APK_TOOL="$BASE/sdk/staging_dir/host/bin/apk"
+          test -x "$APK_TOOL"
           WORK="$(mktemp -d)"
-          tar -xzf "$APK" -C "$WORK"
+          (cd "$WORK" && "$APK_TOOL" extract --allow-untrusted "$BASE/$APK")
           BIN="$WORK/usr/sbin/tailscaled"
           test -x "$BIN"
           echo "Unstripped:"; ls -lh "$BIN"
