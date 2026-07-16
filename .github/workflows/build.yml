@@ -43,12 +43,20 @@ env:
   #   client/server userspace bits.
   # - dnsmasq-full -> dnsmasq: the "full" build adds DNSSEC/extra features
   #   we don't use; the base package covers DHCP+DNS for a home LAN.
+  # - openssl -> mbedtls: mbedTLS is meaningfully smaller than OpenSSL in an
+  #   embedded build. Swapping both wpad's and libustream's TLS backend
+  #   together (mixing the two would just pull in both libraries, worse than
+  #   either alone) was still short by ~130KB, so this covers the rest.
   PACKAGES: >-
     luci
     dnsmasq
+    wpad-basic-mbedtls
+    libustream-mbedtls
     -dnsmasq-full
     -odhcp6c
     -odhcpd-ipv6only
+    -wpad-basic-openssl
+    -libustream-openssl
     -kmod-usb2
     -kmod-usb-ohci
     -kmod-usb-ledtrig-usbport
