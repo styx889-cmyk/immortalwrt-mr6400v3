@@ -1,0 +1,67 @@
+#!/bin/sh /etc/rc.common
+# Runs tailscaled from a tmpfs copy fetched at boot, instead of installing it
+# to flash - the binary (a few MB even stripped) doesn't fit in this
+# device's ~650KB writable overlay. Only tailscaled's small state file
+# (node identity/keys) lives on persistent flash, under $TS_STATE_DIR, so
+# `tailscale up` doesn't need to be repeated after every reboot even though
+# the binary itself does get re-fetched. See README.md.
+
+START=99
+STOP=10
+USE_PROCD=1
+
+TS_URL="https://github.com/styx889-cmyk/immortalwrt-mr6400v3/releases/download/tailscale-latest/tailscaled-mipsel_24kc.tar.gz"
+TS_SHA256_URL="${TS_URL}.sha256"
+TS_BIN="/tmp/tailscaled"
+TS_STATE_DIR="/etc/tailscale"
+FETCH_RETRIES=12
+FETCH_RETRY_DELAY=5
+
+fetch_binary() {
+	logger -t tailscale-ram "fetching tailscaled binary from $TS_URL"
+	tmpd="$(mktemp -d)"
+	i=0
+	while [ "$i" -lt "$FETCH_RETRIES" ]; do
+		if wget -q -O "$tmpd/ts.tar.gz" "$TS_URL"; then
+			break
+		fi
+		i=$((i + 1))
+		sleep "$FETCH_RETRY_DELAY"
+	done
+	if [ ! -s "$tmpd/ts.tar.gz" ]; then
+		logger -t tailscale-ram "download failed after $FETCH_RETRIES attempts, giving up"
+		rm -rf "$tmpd"
+		return 1
+	fi
+
+	expected_sha="$(wget -qO- "$TS_SHA256_URL" | awk '{print $1}')"
+	actual_sha="$(sha256sum "$tmpd/ts.tar.gz" | awk '{print $1}')"
+	if [ -z "$expected_sha" ] || [ "$expected_sha" != "$actual_sha" ]; then
+		logger -t tailscale-ram "checksum mismatch (expected $expected_sha, got $actual_sha), refusing to run it"
+		rm -rf "$tmpd"
+		return 1
+	fi
+
+	tar -xzf "$tmpd/ts.tar.gz" -C /tmp
+	chmod +x "$TS_BIN"
+	ln -sf "$TS_BIN" /tmp/tailscale
+	rm -rf "$tmpd"
+	logger -t tailscale-ram "fetched and verified ok"
+}
+
+start_service() {
+	[ -x "$TS_BIN" ] || fetch_binary
+	if [ ! -x "$TS_BIN" ]; then
+		logger -t tailscale-ram "no usable binary, not starting"
+		return 1
+	fi
+
+	mkdir -p "$TS_STATE_DIR" /var/run/tailscale
+
+	procd_open_instance
+	procd_set_param command "$TS_BIN" \
+		--state="$TS_STATE_DIR/tailscaled.state" \
+		--socket=/var/run/tailscale/tailscaled.sock
+	procd_set_param respawn
+	procd_close_instance
+}

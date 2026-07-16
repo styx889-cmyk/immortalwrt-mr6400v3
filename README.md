@@ -87,6 +87,10 @@ arbitrary round number.
 it**: SSH in, run `mount | grep overlay` — if the source is
 `overlayfs:/tmp/root`, you're on the broken tmpfs fallback, not real flash.
 
+**Confirmed fixed on real hardware**: after the trims above, `mtd4`
+(`rootfs_data`) came out to 896KB (up from 256KB), `mount | grep overlay`
+shows a real `/dev/mtdblock4` jffs2 mount, and settings survive a reboot.
+
 ## Building
 
 Actions tab → **Build ImmortalWrt firmware (TL-MR6400 v4 profile)** →
@@ -134,22 +138,49 @@ Instead, VPN needs are covered by **Tailscale**, which bundles its own
 userspace WireGuard protocol implementation (`wireguard-go`) over a TUN
 device and doesn't need the kernel module.
 
-## Tailscale — not in this image, install it after confirming persistence works
+## Tailscale — runs from RAM, not flash
 
-An earlier version of this repo baked `tailscale` + `luci-app-tailscale-community`
-straight into the firmware. That's on hold: baking it in made the flash-space
-problem above worse, not better (tailscale's binary is a few MB even
-compressed, on a device with barely any margin to begin with), and there was
-no point trying to fit it in before the base image could even hold a
-persistent config.
+Tailscale needs are covered, but not by installing a package. Numbers that
+ruled that out:
 
-The prebuilt `tailscale` .apk still isn't published for `mipsel_24kc` on any
-OpenWrt/ImmortalWrt feed, official or third-party — the one third-party feed
-that exists, [lanrat/openwrt-tailscale-repo](https://github.com/lanrat/openwrt-tailscale-repo),
-only publishes old-format `opkg` `.ipk` packages, incompatible with this
-image's `apk` package manager. So installing it later still means
-cross-compiling it (via the ImmortalWrt SDK, targeting this same
-release/arch) and side-loading the resulting `.apk` through LuCI's
-System → Software → "Upload Package", rather than a plain `apk add tailscale`.
-Once the base image's overlay is confirmed persistent (see above), that's the
-next thing to sort out — not done yet.
+- The overlay has ~650KB free (see above).
+- Even the leanest `tailscaled` build for this arch is **6.2MB** stripped +
+  UPX-compressed (measured from a same-arch third-party build,
+  [GuNanOvO/openwrt-tailscale](https://github.com/GuNanOvO/openwrt-tailscale)).
+  ~9x too big for the flash budget, not a "trim a bit more" problem.
+- The official static build from tailscale.com itself is worse for this
+  purpose - 31MB, since it's not stripped/compressed for embedded use.
+- The prebuilt `tailscale` .apk isn't published for `mipsel_24kc` on any
+  OpenWrt/ImmortalWrt feed anyway (official or third-party — the one
+  third-party feed that exists,
+  [lanrat/openwrt-tailscale-repo](https://github.com/lanrat/openwrt-tailscale-repo),
+  only publishes old-format `opkg` `.ipk`, incompatible with this image's
+  `apk` package manager).
+
+Flash is the scarce resource here, not RAM (56MB total, tens of MB free at
+idle). So:
+
+1. **`build-tailscale`** (in `build.yml`) cross-compiles `tailscaled` from
+   the same `immortalwrt/packages` recipe via the ImmortalWrt SDK, strips
+   and UPX-compresses it, and publishes it to this repo's `tailscale-latest`
+   GitHub Release — a stable, fixed URL, rebuilt on every workflow run.
+2. **`files/etc/init.d/tailscale-ram`** is baked into the firmware image
+   (a few KB, no flash impact). At boot, it downloads that release asset
+   into `/tmp` (tmpfs/RAM), verifies its SHA256 against the checksum file
+   published alongside it, and runs `tailscaled` from there.
+3. Only `tailscaled`'s state file (node identity/keys, a few KB) lives on
+   the real persistent overlay at `/etc/tailscale/tailscaled.state` — so
+   `tailscale up` doesn't need to be redone after every reboot, even though
+   the binary itself gets re-fetched from GitHub each time.
+
+Trade-off to know about: **this router now downloads and executes a binary
+from the internet on every boot**, unattended. The source is this repo's own
+GitHub Release (not a third party), and the init script verifies a SHA256
+before running it, but this is a meaningfully different risk profile than a
+normal installed package - if GitHub is unreachable at boot, or the checksum
+doesn't match, tailscale just won't start that boot (logged via `logread`,
+tag `tailscale-ram`) rather than failing closed some other way.
+
+After flashing, run `tailscale up` over SSH (or use the LuCI page once
+`luci-app-tailscale-community` is added — not done yet, works fine from the
+CLI in the meantime) and follow the login link it prints.
