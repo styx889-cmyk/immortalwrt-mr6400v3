@@ -31,13 +31,17 @@ env:
   # kmod-mt7603 (wifi), and (from the mr6400-v4 device definition) USB + LTE modem
   # support (kmod-usb2, kmod-usb-ohci, kmod-usb-ledtrig-usbport,
   # kmod-usb-serial-option, kmod-usb-net-qmi-wwan, uqmi) + ppp.
-  # We add WireGuard (+ LuCI UI) and strip USB/LTE/PPP, which we don't need.
+  # We strip USB/LTE/PPP, which we don't need.
+  #
+  # NOTE: no kmod-wireguard here on purpose. ImmortalWrt does not build the
+  # WireGuard kernel module for ramips/mt76x8 at all (checked 23.05/24.10/
+  # 25.12/snapshot - none have it), so wireguard-tools/luci-proto-wireguard
+  # would install but never actually establish a tunnel. VPN is handled by
+  # Tailscale post-install instead, which uses its own userspace WireGuard
+  # implementation (wireguard-go) over a TUN device and doesn't need the
+  # kernel module. See README.md.
   PACKAGES: >-
     luci
-    luci-app-wireguard
-    luci-proto-wireguard
-    wireguard-tools
-    kmod-wireguard
     -kmod-usb2
     -kmod-usb-ohci
     -kmod-usb-ledtrig-usbport

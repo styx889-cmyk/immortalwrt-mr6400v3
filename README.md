@@ -42,9 +42,9 @@ Actions tab → **Build ImmortalWrt firmware (TL-MR6400 v4 profile)** →
 `25.12.1`). Takes a few minutes (uses ImageBuilder, not a full source
 compile). Output `.bin` files are attached as a workflow artifact.
 
-Package set: `luci`, `luci-app-wireguard` (+ WireGuard kmod/tools), LAN and
-WiFi (already in the target's defaults). Stripped: USB, LTE/QMI modem
-support, PPP — none of it is needed for this use case.
+Package set: `luci`, plus LAN and WiFi (already in the target's defaults).
+Stripped: USB, LTE/QMI modem support, PPP — none of it is needed for this
+use case. No dedicated WireGuard packages — see below.
 
 ## Flashing — do this carefully
 
@@ -64,10 +64,20 @@ support, PPP — none of it is needed for this use case.
 4. After a successful flash: LuCI is at `192.168.1.1`, set a root password
    on first login.
 
-## WireGuard
+## VPN: Tailscale only, no standalone WireGuard
 
-`luci-app-wireguard` is installed — configure interfaces under
-**Network → Interfaces** in LuCI rather than hand-editing UCI.
+ImmortalWrt does **not build the WireGuard kernel module (`kmod-wireguard`)
+for ramips/mt76x8 at all** — confirmed absent from the package feed across
+23.05, 24.10, 25.12, and snapshot. `wireguard-tools` and
+`luci-proto-wireguard` exist as packages, but installing them alone would
+give you a LuCI page that can never actually establish a tunnel, since the
+kernel-side implementation is missing. Getting real kernel WireGuard here
+would require a full source build with a patched kernel config, not
+ImageBuilder — out of scope for this repo.
+
+Instead, VPN needs are covered by **Tailscale** (below), which bundles its
+own userspace WireGuard protocol implementation (`wireguard-go`) over a TUN
+device and doesn't need the kernel module.
 
 ## Tailscale (post-install)
 
