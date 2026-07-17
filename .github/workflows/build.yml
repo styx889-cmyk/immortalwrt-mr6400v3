@@ -64,10 +64,24 @@ env:
   # kmod-tun: tailscaled DEPENDS on this (not built into the kernel here,
   # unlike IPv6) - needed for the TUN device it creates. Small (~21KB), not
   # baked-in tailscaled itself - see the tailscale-ram comment above.
+  #
+  # kmod-zram + zram-swap: tailscaled's Go runtime genuinely needs more
+  # resident memory (~15MB) than this device has free (~10.7MB available
+  # per `free`, out of 56MB total, no swap) - confirmed on real hardware via
+  # dmesg: `__vm_enough_memory` rejected its initial allocation, and even
+  # after `sysctl vm.overcommit_memory=1` plus aggressive
+  # GOGC=20/GOMEMLIMIT=10MiB tuning, the OOM killer still killed it
+  # (anon-rss:15004kB at kill time). Compressed RAM-backed swap gives the
+  # kernel breathing room to page out colder memory instead of outright
+  # refusing/killing. ~64KB total added (kmod-zram + zram-swap +
+  # swap-utils dependency) - small next to the ~15MB problem it's meant to
+  # help with.
   PACKAGES: >-
     luci
     dnsmasq
     kmod-tun
+    kmod-zram
+    zram-swap
     -dnsmasq-full
     -odhcp6c
     -odhcpd-ipv6only
