@@ -274,7 +274,20 @@ jobs:
           set -euo pipefail
           cd src
           make download -j"$(nproc)"
-          make -j"$(nproc)" FILES="${{ github.workspace }}/files" || make -j1 V=s FILES="${{ github.workspace }}/files"
+          # IMPORTANT: FILES= must NOT be passed to this main build. GNU Make
+          # propagates command-line variables into every recursive $(MAKE)
+          # call, and OpenWrt's kernel module packaging
+          # (include/kernel-defaults.mk) *also* uses a variable named FILES
+          # internally, to list which .ko path(s) belong to each kmod-*
+          # package. Passing our own FILES= here silently overrides that in
+          # every kmod package's build, breaking all of them (confirmed on
+          # a real run: every "for mod in $(FILES)" loop iterated over our
+          # rootfs overlay directory instead of the package's actual .ko).
+          make -j"$(nproc)" || make -j1 V=s
+          # FILES= (our rootfs overlay) is only safe to apply at the final
+          # image-generation stage, once all packages are already built -
+          # nothing left to recurse into that also uses that name.
+          make -j1 V=s FILES="${{ github.workspace }}/files" target/install
 
       - name: Check overlay headroom
         run: |
