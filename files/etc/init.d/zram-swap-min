@@ -1,0 +1,27 @@
+#!/bin/sh /etc/rc.common
+# The stock zram-swap package's init script hardcodes `busybox mkswap`/
+# `busybox swapon`; this device's busybox build doesn't include those
+# applets (confirmed absent from `busybox --help`), so that script
+# silently does nothing. This uses the real swap-utils binaries instead.
+# 16MB zram (compressed, so effectively more) gives tailscaled's Go
+# runtime somewhere to page out to instead of getting OOM-killed - see
+# build.yml env comments for the full story.
+
+START=15
+
+ZRAM_DEV=/dev/zram0
+ZRAM_SIZE_BYTES=16777216
+
+start_service() {
+	insmod zram 2>/dev/null
+	[ -e "$ZRAM_DEV" ] || return 1
+	grep -q "$(basename "$ZRAM_DEV")" /proc/swaps 2>/dev/null && return 0
+	echo "$ZRAM_SIZE_BYTES" > "/sys/block/$(basename "$ZRAM_DEV")/disksize"
+	mkswap "$ZRAM_DEV" >/dev/null
+	swapon "$ZRAM_DEV"
+}
+
+stop_service() {
+	swapoff "$ZRAM_DEV" 2>/dev/null
+	echo 1 > "/sys/block/$(basename "$ZRAM_DEV")/reset" 2>/dev/null
+}

@@ -65,23 +65,41 @@ env:
   # unlike IPv6) - needed for the TUN device it creates. Small (~21KB), not
   # baked-in tailscaled itself - see the tailscale-ram comment above.
   #
-  # kmod-zram + zram-swap: tailscaled's Go runtime genuinely needs more
-  # resident memory (~15MB) than this device has free (~10.7MB available
-  # per `free`, out of 56MB total, no swap) - confirmed on real hardware via
-  # dmesg: `__vm_enough_memory` rejected its initial allocation, and even
-  # after `sysctl vm.overcommit_memory=1` plus aggressive
-  # GOGC=20/GOMEMLIMIT=10MiB tuning, the OOM killer still killed it
-  # (anon-rss:15004kB at kill time). Compressed RAM-backed swap gives the
-  # kernel breathing room to page out colder memory instead of outright
-  # refusing/killing. ~64KB total added (kmod-zram + zram-swap +
-  # swap-utils dependency) - small next to the ~15MB problem it's meant to
-  # help with.
+  # kmod-zram + zram-swap + swap-utils: tailscaled's Go runtime genuinely
+  # needs more resident memory (~15MB) than this device has free (~10.7MB
+  # available per `free`, out of 56MB total, no swap) - confirmed on real
+  # hardware via dmesg: `__vm_enough_memory` rejected its initial
+  # allocation, and even after `sysctl vm.overcommit_memory=1` plus
+  # aggressive GOGC=20/GOMEMLIMIT=10MiB tuning, the OOM killer still killed
+  # it (anon-rss:15004kB at kill time).
+  #
+  # Getting swap actually working here took more than adding a package:
+  # 1. The zram-swap package's own init script calls `busybox mkswap`/
+  #    `busybox swapon` explicitly - this device's busybox build doesn't
+  #    have those applets (absent from `busybox --help`), so it silently
+  #    no-ops. Not used here for that reason - see
+  #    files/etc/init.d/zram-swap-min instead, which uses the real
+  #    swap-utils binaries.
+  # 2. Even with real swap-utils' own mkswap/swapon run by hand, `/proc/swaps`
+  #    never appeared and swapon reported "Function not implemented" (ENOSYS)
+  #    - confirmed on real hardware via SSH, with no corresponding dmesg
+  #    output, meaning the kernel itself rejected it. This is despite
+  #    target/linux/generic/config-6.12 showing CONFIG_SWAP=y upstream - the
+  #    actual shipped ImageBuilder kernel evidently doesn't have it, for
+  #    reasons not fully root-caused (likely something in the Kconfig
+  #    dependency chain auto-disabling it for this device/profile).
+  # 3. Given (2), this repo no longer uses ImageBuilder for build-firmware -
+  #    see that job below. It builds from full source instead, with an
+  #    explicit `echo "CONFIG_SWAP=y" >> .../config-6.12` forced into the
+  #    kernel config before the kernel builds, to settle the question by
+  #    construction rather than trusting whatever the upstream default
+  #    resolves to.
   PACKAGES: >-
     luci
     dnsmasq
     kmod-tun
     kmod-zram
-    zram-swap
+    swap-utils
     -dnsmasq-full
     -odhcp6c
     -odhcpd-ipv6only
@@ -199,6 +217,12 @@ jobs:
           gh release upload tailscale-latest --repo "${{ github.repository }}" --clobber \
             "out/tailscaled-${ARCH}.tar.gz" "out/tailscaled-${ARCH}.tar.gz.sha256"
 
+  # Full source build, not ImageBuilder - needed to force CONFIG_SWAP=y into
+  # the kernel (see the PACKAGES comment above for why). Much slower
+  # (toolchain + kernel + packages all compiled from scratch, ~1-2 hours vs
+  # ImageBuilder's ~1 minute), but it's the only way to actually control the
+  # kernel config rather than trusting whatever ImageBuilder's prebuilt
+  # kernel happens to have.
   build-firmware:
     needs: resolve-version
     runs-on: ubuntu-latest
@@ -208,29 +232,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune -a -f 2>/dev/null || true
+          df -h
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget zstd \
+            python3-distutils
 
-      - name: Download ImageBuilder
+      - name: Clone ImmortalWrt source (v${{ env.VERSION }})
         run: |
           set -euo pipefail
-          FILE="immortalwrt-imagebuilder-${VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.zst"
-          URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}/${FILE}"
-          echo "Downloading $URL"
-          curl -fL -o imagebuilder.tar.zst "$URL"
-          mkdir -p imagebuilder
-          tar --use-compress-program=unzstd -xf imagebuilder.tar.zst -C imagebuilder --strip-components=1
+          git clone --branch "v${VERSION}" --depth 1 https://github.com/immortalwrt/immortalwrt.git src
 
-      - name: Build firmware image
+      - name: Update and install feeds
         run: |
           set -euo pipefail
-          cd imagebuilder
-          make image \
-            PROFILE="${PROFILE}" \
-            PACKAGES="${PACKAGES}" \
-            FILES="${{ github.workspace }}/files"
+          cd src
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Force-enable CONFIG_SWAP in the kernel config
+        run: |
+          set -euo pipefail
+          echo "CONFIG_SWAP=y" >> src/target/linux/ramips/mt76x8/config-6.12
+
+      - name: Configure target, profile, and packages
+        run: |
+          set -euo pipefail
+          cp ci/mt76x8-seed.config src/.config
+          cd src
+          make defconfig
+
+      - name: Build (this takes a while)
+        run: |
+          set -euo pipefail
+          cd src
+          make download -j"$(nproc)"
+          make -j"$(nproc)" FILES="${{ github.workspace }}/files" || make -j1 V=s FILES="${{ github.workspace }}/files"
 
       - name: Check overlay headroom
         run: |
@@ -242,7 +287,7 @@ jobs:
           # for JFFS2 to actually work rather than just barely mount, so that's
           # the bar here rather than the more arbitrary 1MB tried earlier.
           MIN_OVERLAY=524288
-          IMG="$(find imagebuilder/bin/targets/${TARGET}/${SUBTARGET} -iname '*squashfs-sysupgrade.bin')"
+          IMG="$(find src/bin/targets/${TARGET}/${SUBTARGET} -iname '*squashfs-sysupgrade.bin')"
           SIZE=$(stat -c%s "$IMG")
           FREE=$((FIRMWARE_BUDGET - SIZE))
           echo "Firmware image: $IMG"
@@ -257,7 +302,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          cp imagebuilder/bin/targets/${TARGET}/${SUBTARGET}/*${PROFILE}* out/
+          cp src/bin/targets/${TARGET}/${SUBTARGET}/*${PROFILE}* out/
           ls -lh out/
 
       - name: Upload firmware artifact
