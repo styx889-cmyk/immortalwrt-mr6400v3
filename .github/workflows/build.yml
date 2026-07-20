@@ -89,11 +89,16 @@ env:
   #    reasons not fully root-caused (likely something in the Kconfig
   #    dependency chain auto-disabling it for this device/profile).
   # 3. Given (2), this repo no longer uses ImageBuilder for build-firmware -
-  #    see that job below. It builds from full source instead, with an
-  #    explicit `echo "CONFIG_SWAP=y" >> .../config-6.12` forced into the
-  #    kernel config before the kernel builds, to settle the question by
-  #    construction rather than trusting whatever the upstream default
-  #    resolves to.
+  #    see that job below. It builds from full source instead.
+  # 4. Root cause, finally: OpenWrt's own config/Config-kernel.in ties
+  #    CONFIG_KERNEL_SWAP's default to `!SMALL_FLASH`, and this profile
+  #    counts as small-flash - so swap is off by *policy*, not because of an
+  #    unmet Kconfig dependency in the kernel itself. Hand-editing the raw
+  #    kernel config-6.12 file didn't stick, because `make defconfig`
+  #    resyncs the kernel config from this exact top-level OpenWrt option
+  #    afterwards, clobbering the direct edit. Fixed by setting
+  #    `CONFIG_KERNEL_SWAP=y` in ci/mt76x8-seed.config instead - the
+  #    proper, OpenWrt-native toggle for this, not a workaround.
   PACKAGES: >-
     luci
     dnsmasq
@@ -256,11 +261,6 @@ jobs:
           cd src
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      - name: Force-enable CONFIG_SWAP in the kernel config
-        run: |
-          set -euo pipefail
-          echo "CONFIG_SWAP=y" >> src/target/linux/ramips/mt76x8/config-6.12
 
       - name: Configure target, profile, and packages
         run: |
